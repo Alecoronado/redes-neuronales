@@ -1,56 +1,99 @@
-# Copyright (c) Streamlit Inc. (2018-2022) Snowflake Inc. (2022)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import time
-
-import numpy as np
-
+import pandas as pd
 import streamlit as st
-from streamlit.hello.utils import show_code
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import mean_absolute_error, r2_score  # Añadimos la importación de r2_score
+
+# Función para cargar y preprocesar los datos
+def load_and_preprocess_data(uploaded_file):
+    df = pd.read_excel(uploaded_file)
+
+    # Preparar la variable 'Año' como categoría
+    df['Años'] = pd.Categorical(df['Años'])
+    df['Año_Cat'] = df['Años'].cat.codes
+    encoder = OneHotEncoder(sparse_output=False)
+    encoded_year = encoder.fit_transform(df[['Año_Cat']])
+
+    # Escalar 'RecenciaDesembolso'
+    scaler = StandardScaler()
+    recencia_desembolso_scaled = scaler.fit_transform(df[['RecenciaDesembolso']])
+
+    # Codificar variables categóricas
+    categorical_features = ['Sector', 'SubSector', 'Pais']
+    encoded_features = encoder.fit_transform(df[categorical_features])
+
+    # Combinar características
+    X_scaled = np.concatenate([encoded_features, recencia_desembolso_scaled], axis=1)
+    y_regression = df['Porcentaje Acumulado'].values
+
+    # Dividir los datos
+    X_train, X_test, y_reg_train, y_reg_test = train_test_split(
+        X_scaled, y_regression, test_size=0.2, random_state=42
+    )
+
+    return X_train, X_test, y_reg_train, y_reg_test, encoder
 
 
-def plotting_demo():
-    progress_bar = st.sidebar.progress(0)
-    status_text = st.sidebar.empty()
-    last_rows = np.random.randn(1, 1)
-    chart = st.line_chart(last_rows)
+# Función para construir y entrenar el modelo
+def build_and_train_model(X_train, y_reg_train):
+    # Diseñar la red neuronal con TensorFlow y Keras
+    input_layer = Input(shape=(X_train.shape[1],))
+    hidden1 = Dense(128, activation='relu')(input_layer)
+    hidden2 = Dense(64, activation='relu')(hidden1)
+    output_reg = Dense(1, name='regression_output')(hidden2)
 
-    for i in range(1, 101):
-        new_rows = last_rows[-1, :] + np.random.randn(5, 1).cumsum(axis=0)
-        status_text.text("%i%% Complete" % i)
-        chart.add_rows(new_rows)
-        progress_bar.progress(i)
-        last_rows = new_rows
-        time.sleep(0.05)
+    model = Model(inputs=input_layer, outputs=output_reg)
 
-    progress_bar.empty()
+    model.compile(optimizer=Adam(),
+                loss='mean_squared_error',
+                metrics=['mae'])
 
-    # Streamlit widgets automatically run the script from top to bottom. Since
-    # this button is not connected to any other logic, it just causes a plain
-    # rerun.
-    st.button("Re-run")
+    # Entrenar el modelo
+    history = model.fit(X_train, y_reg_train,
+                        epochs=450,
+                        validation_split=0.2)
+    
+    return model
+
+# Función para evaluar el modelo
+def evaluate_model(model, X_test, y_reg_test):
+    # Realizar predicciones
+    y_reg_pred = model.predict(X_test)
+
+    # Calcular el Error Absoluto Medio (MAE) para Porcentaje Acumulado
+    reg_mae = mean_absolute_error(y_reg_test, y_reg_pred.flatten())
+    
+    # Calcular el coeficiente de determinación (R^2)
+    r2 = r2_score(y_reg_test, y_reg_pred)
+    
+    return reg_mae, r2
 
 
-st.set_page_config(page_title="Plotting Demo", page_icon="📈")
-st.markdown("# Plotting Demo")
-st.sidebar.header("Plotting Demo")
-st.write(
-    """This demo illustrates a combination of plotting and animation with
-Streamlit. We're generating a bunch of random numbers in a loop for around
-5 seconds. Enjoy!"""
-)
+# Aplicación Streamlit
+def main():
+    st.title("Aplicación de Streamlit para Modelo de Redes Neuronales")
 
-plotting_demo()
+    uploaded_file = st.file_uploader("Carga tu archivo Excel", type="xlsx")
+    if uploaded_file is not None:
+        with st.spinner('Cargando y preprocesando datos...'):
+            X_train, X_test, y_reg_train, y_reg_test, encoder = load_and_preprocess_data(uploaded_file)
+            st.success('¡Datos cargados y preprocesados con éxito!')
 
-show_code(plotting_demo)
+        if st.button('Entrenar Modelo'):
+            with st.spinner('Entrenando el modelo...'):
+                model = build_and_train_model(X_train, y_reg_train)
+                st.success('Modelo entrenado')
+
+            reg_mae, r2 = evaluate_model(model, X_test, y_reg_test)
+            st.write(f"Error Absoluto Medio (MAE) para Porcentaje Acumulado: {reg_mae}")
+            st.write(f"Coeficiente de Determinación (R^2): {r2}")
+            
+
+if __name__ == "__main__":
+    main()
+
+

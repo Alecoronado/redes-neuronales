@@ -1,84 +1,104 @@
-# Copyright (c) Streamlit Inc. (2018-2022) Snowflake Inc. (2022)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-from typing import Any
-
-import numpy as np
-
 import streamlit as st
-from streamlit.hello.utils import show_code
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import accuracy_score, mean_absolute_error
+import openpyxl  # Asegúrate de tener esta librería si trabajas con archivos Excel
+
+# Función para cargar y preprocesar los datos
+def load_and_preprocess_data(uploaded_file):
+    df = pd.read_excel(uploaded_file)
+
+    # Seleccionar solo las variables específicas para X
+    features = df[['Sector', 'SubSector', 'Pais', 'RecenciaDesembolso']]
+
+    # Preparar la variable 'Año' como categoría
+    df['Años'] = pd.Categorical(df['Años'])
+    df['Año_Cat'] = df['Años'].cat.codes
+    encoder = OneHotEncoder(sparse_output=False)
+    encoded_year = encoder.fit_transform(df[['Año_Cat']])
+
+    # Escalar 'RecenciaDesembolso'
+    scaler = StandardScaler()
+    recencia_desembolso_scaled = scaler.fit_transform(df[['RecenciaDesembolso']])
+
+    # Codificar variables categóricas
+    categorical_features = ['Sector', 'SubSector', 'Pais']
+    encoded_features = encoder.fit_transform(df[categorical_features])
+
+    # Combinar características
+    X_scaled = np.concatenate([encoded_features, recencia_desembolso_scaled], axis=1)
+    y_regression = df['Porcentaje Acumulado'].values
+
+    # Dividir los datos
+    X_train, X_test, y_year_train, y_year_test, y_reg_train, y_reg_test = train_test_split(
+        X_scaled, encoded_year, y_regression, test_size=0.2, random_state=42
+    )
+
+    return X_train, X_test, y_year_train, y_year_test, y_reg_train, y_reg_test, encoder
+
+# Función para construir y entrenar el modelo
+def build_and_train_model(X_train, y_year_train, y_reg_train, encoder):
+    input_layer = Input(shape=(X_train.shape[1],))
+    hidden1 = Dense(128, activation='relu')(input_layer)
+    hidden2 = Dense(64, activation='relu')(hidden1)
+    output_year = Dense(encoder.categories_[0].size, activation='softmax', name='year_output')(hidden2)
+    output_reg = Dense(1, name='regression_output')(hidden2)
+
+    model = Model(inputs=input_layer, outputs=[output_year, output_reg])
+
+    model.compile(optimizer=Adam(),
+                  loss={'year_output': 'categorical_crossentropy', 'regression_output': 'mean_squared_error'},
+                  metrics={'year_output': 'accuracy', 'regression_output': 'mae'})
+    
+    # Convertir y_year_train a una representación de una sola columna
+    y_year_train_single_column = np.argmax(y_year_train, axis=1).reshape(-1, 1)
+
+    history = model.fit(X_train, {'year_output': y_year_train_single_column, 'regression_output': y_reg_train},
+                        epochs=200,  # Ajusta este número según tus necesidades
+                        validation_split=0.2,
+                        verbose=0)  # Cambia a verbose=1 para ver la salida del entrenamiento
+
+    return model
 
 
-def animation_demo() -> None:
 
-    # Interactive Streamlit elements, like these sliders, return their value.
-    # This gives you an extremely simple interaction model.
-    iterations = st.sidebar.slider("Level of detail", 2, 20, 10, 1)
-    separation = st.sidebar.slider("Separation", 0.7, 2.0, 0.7885)
+# Función para realizar predicciones y evaluar el modelo
+def evaluate_model(model, X_test, y_year_test, y_reg_test, encoder):
+    predictions = model.predict(X_test)
+    y_year_pred, y_reg_pred = predictions
 
-    # Non-interactive elements return a placeholder to their location
-    # in the app. Here we're storing progress_bar to update it later.
-    progress_bar = st.sidebar.progress(0)
+    y_year_pred_classes = np.argmax(y_year_pred, axis=1)
+    y_year_test_classes = np.argmax(y_year_test, axis=1)
 
-    # These two elements will be filled in later, so we create a placeholder
-    # for them using st.empty()
-    frame_text = st.sidebar.empty()
-    image = st.empty()
+    year_accuracy = accuracy_score(y_year_test_classes, y_year_pred_classes)
+    reg_mae = mean_absolute_error(y_reg_test, y_reg_pred.flatten())
 
-    m, n, s = 960, 640, 400
-    x = np.linspace(-m / s, m / s, num=m).reshape((1, m))
-    y = np.linspace(-n / s, n / s, num=n).reshape((n, 1))
+    return year_accuracy, reg_mae
 
-    for frame_num, a in enumerate(np.linspace(0.0, 4 * np.pi, 100)):
-        # Here were setting value for these two elements.
-        progress_bar.progress(frame_num)
-        frame_text.text("Frame %i/100" % (frame_num + 1))
+# Aplicación Streamlit
+def main():
+    st.title("Aplicación de Streamlit para Modelo de Redes Neuronales")
 
-        # Performing some fractal wizardry.
-        c = separation * np.exp(1j * a)
-        Z = np.tile(x, (n, 1)) + 1j * np.tile(y, (1, m))
-        C = np.full((n, m), c)
-        M: Any = np.full((n, m), True, dtype=bool)
-        N = np.zeros((n, m))
+    uploaded_file = st.file_uploader("Carga tu archivo Excel", type="xlsx")
+    if uploaded_file is not None:
+        with st.spinner('Cargando y preprocesando datos...'):
+            X_train, X_test, y_year_train, y_year_test, y_reg_train, y_reg_test, encoder = load_and_preprocess_data(uploaded_file)
+            st.success('¡Datos cargados y preprocesados con éxito!')
 
-        for i in range(iterations):
-            Z[M] = Z[M] * Z[M] + C[M]
-            M[np.abs(Z) > 2] = False
-            N[M] = i
+        if st.button('Entrenar Modelo'):
+            with st.spinner('Entrenando el modelo...'):
+                model = build_and_train_model(X_train, y_year_train, y_reg_train, encoder)
+                st.success('Modelo entrenado')
 
-        # Update the image placeholder by calling the image() function on it.
-        image.image(1.0 - (N / N.max()), use_column_width=True)
+            year_accuracy, reg_mae = evaluate_model(model, X_test, y_year_test, y_reg_test, encoder)
+            st.write(f"Exactitud de la predicción de año: {year_accuracy}")
+            st.write(f"Error Absoluto Medio (MAE) para Porcentaje Acumulado: {reg_mae}")
 
-    # We clear elements by calling empty on them.
-    progress_bar.empty()
-    frame_text.empty()
+if __name__ == "__main__":
+    main()
 
-    # Streamlit widgets automatically run the script from top to bottom. Since
-    # this button is not connected to any other logic, it just causes a plain
-    # rerun.
-    st.button("Re-run")
-
-
-st.set_page_config(page_title="Animation Demo", page_icon="📹")
-st.markdown("# Animation Demo")
-st.sidebar.header("Animation Demo")
-st.write(
-    """This app shows how you can use Streamlit to build cool animations.
-It displays an animated fractal based on the the Julia Set. Use the slider
-to tune different parameters."""
-)
-
-animation_demo()
-
-show_code(animation_demo)
